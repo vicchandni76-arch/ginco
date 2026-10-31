@@ -17,8 +17,10 @@ const state = {
   pricesQuery: "", dataTab: "suppliers",
 };
 
-function prefGet(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } }
-function prefSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
+// Preferences are kept in memory for this visit (works in any hosting environment).
+const prefs = {};
+function prefGet(k, d) { return prefs[k] ?? d; }
+function prefSet(k, v) { prefs[k] = v; }
 
 /* ───────────────────────── helpers ───────────────────────── */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
