@@ -45,14 +45,18 @@ const schema = {
 
 function pickText(r: any): string {
   if (typeof r?.output_text === "string") return r.output_text;
-  const parts: string[] = [];
-  const walk = (n: any) => {
-    if (!n || typeof n !== "object") return;
-    if (n.type === "text" && typeof n.text === "string") parts.push(n.text);
-    for (const k of Object.keys(n)) walk(n[k]);
-  };
-  walk(r?.steps ?? r?.outputs ?? r);
-  return parts.join("");
+  // Interactions API: text lives in model_output steps (ignore echoed user input)
+  const steps: any[] = Array.isArray(r?.steps) ? r.steps : Array.isArray(r?.outputs) ? r.outputs : [];
+  const fromSteps = steps
+    .filter((st) => !st?.type || st.type === "model_output" || st.type === "text")
+    .flatMap((st) => (Array.isArray(st?.content) ? st.content : [st]))
+    .filter((c) => c?.type === "text" && typeof c.text === "string")
+    .map((c) => c.text).join("");
+  if (fromSteps) return fromSteps;
+  // generateContent (legacy) shape
+  const parts = r?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) return parts.map((p: any) => p?.text ?? "").join("");
+  return "";
 }
 
 const json = (b: unknown, status = 200) =>
@@ -80,21 +84,32 @@ Deno.serve(async (req: Request) => {
   const input: unknown[] = [{ type: "text", text: prompt }];
   if (image_base64) input.push({ type: "image", data: image_base64, mime_type: mime_type || "image/jpeg" });
 
-  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+  // 1st try: Interactions API (Google's default since June 2026)
+  let res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
     method: "POST",
     headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      input,
-      response_format: { type: "text", mime_type: "application/json", schema },
-    }),
+    body: JSON.stringify({ model: MODEL, input, response_format: { type: "text", mime_type: "application/json", schema } }),
   });
-  const raw = await res.json().catch(() => ({}));
-  if (!res.ok) return json({ error: "Gemini request failed", status: res.status, detail: raw }, 502);
+  let raw: any = await res.json().catch(() => ({}));
+  let via = "interactions";
+
+  // Fallback: generateContent (stable legacy endpoint)
+  if (!res.ok || !pickText(raw)) {
+    const parts: unknown[] = [{ text: prompt }];
+    if (image_base64) parts.push({ inline_data: { mime_type: mime_type || "image/jpeg", data: image_base64 } });
+    const res2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema, temperature: 0 } }),
+    });
+    const raw2 = await res2.json().catch(() => ({}));
+    if (res2.ok && pickText(raw2)) { res = res2; raw = raw2; via = "generateContent"; }
+    else if (!res.ok) return json({ error: "Gemini request failed", status: res2.status || res.status, detail: raw2?.error ?? raw?.error ?? raw2 }, 502);
+  }
 
   const out = pickText(raw).replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
   try {
-    return json({ ok: true, model: MODEL, data: JSON.parse(out) });
+    return json({ ok: true, model: MODEL, via, data: JSON.parse(out) });
   } catch {
     return json({ error: "Could not parse model output", output: out }, 502);
   }

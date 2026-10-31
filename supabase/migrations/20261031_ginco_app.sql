@@ -68,7 +68,7 @@ begin
   if v_business is null or not app_is_member(v_business) then raise exception 'Not a member of this business'; end if;
   if v_kind not in ('invoice', 'delivery_note') then raise exception 'kind must be invoice or delivery_note'; end if;
 
-  v_supplier := coalesce((p->>'supplier_id')::uuid, ginco_find_or_create_supplier(v_business, p->>'supplier_name'));
+  v_supplier := coalesce(nullif(p->>'supplier_id', '')::uuid, ginco_find_or_create_supplier(v_business, p->>'supplier_name'));
 
   if p->>'image_sha256' is not null then
     insert into documents(business_id, source, source_key, storage_path, sha256, status, extracted_data)
@@ -96,7 +96,7 @@ begin
 
   for v_line in select * from jsonb_array_elements(coalesce(p->'lines', '[]'::jsonb)) loop
     v_n := v_n + 1;
-    v_product := coalesce((v_line->>'product_id')::uuid,
+    v_product := coalesce(nullif(v_line->>'product_id', '')::uuid,
                           ginco_find_or_create_product(v_business, coalesce(nullif(v_line->>'product_name', ''), v_line->>'description'),
                                                        v_line->>'unit', nullif(v_line->>'pack_size', '')::numeric));
     if v_invoice is not null then
@@ -105,10 +105,10 @@ begin
                 nullif(v_line->>'quantity', '')::numeric, nullif(nullif(v_line->>'pack_size', '')::numeric, 0), nullif(v_line->>'unit', ''),
                 nullif(v_line->>'unit_price', '')::numeric, nullif(v_line->>'tax_amount', '')::numeric, nullif(v_line->>'line_total', '')::numeric);
     end if;
-    insert into goods_receipt_lines(business_id, receipt_id, product_id, description, qty_received, unit, unit_price, line_total, vat_rate, batch_code, best_before, notes)
+    insert into goods_receipt_lines(business_id, receipt_id, product_id, description, qty_received, unit, unit_price, vat_rate, batch_code, best_before, notes)
       values (v_business, v_receipt, v_product, coalesce(nullif(v_line->>'description', ''), 'Line ' || v_n),
               coalesce(nullif(v_line->>'quantity', '')::numeric, 0), nullif(v_line->>'unit', ''), nullif(v_line->>'unit_price', '')::numeric,
-              nullif(v_line->>'line_total', '')::numeric, nullif(v_line->>'vat_rate', '')::numeric, nullif(v_line->>'batch_code', ''),
+              nullif(v_line->>'vat_rate', '')::numeric, nullif(v_line->>'batch_code', ''),
               nullif(v_line->>'best_before', '')::date, nullif(v_line->>'notes', ''));
   end loop;
 
@@ -126,7 +126,7 @@ declare
   v_supplier uuid; v_order uuid; v_product uuid; v_line jsonb; v_n int := 0; v_voice uuid;
 begin
   if v_business is null or not app_is_member(v_business) then raise exception 'Not a member of this business'; end if;
-  v_supplier := coalesce((p->>'supplier_id')::uuid, ginco_find_or_create_supplier(v_business, p->>'supplier_name'));
+  v_supplier := coalesce(nullif(p->>'supplier_id', '')::uuid, ginco_find_or_create_supplier(v_business, p->>'supplier_name'));
 
   insert into purchase_orders(business_id, supplier_id, order_number, order_date, expected_date, status, ordered_via, notes, created_by)
     values (v_business, v_supplier, nullif(p->>'order_number', ''), coalesce(nullif(p->>'order_date', '')::date, current_date),
@@ -135,7 +135,7 @@ begin
 
   for v_line in select * from jsonb_array_elements(coalesce(p->'lines', '[]'::jsonb)) loop
     v_n := v_n + 1;
-    v_product := coalesce((v_line->>'product_id')::uuid,
+    v_product := coalesce(nullif(v_line->>'product_id', '')::uuid,
                           ginco_find_or_create_product(v_business, coalesce(nullif(v_line->>'product_name', ''), v_line->>'description'),
                                                        v_line->>'unit', nullif(v_line->>'pack_size', '')::numeric));
     insert into purchase_order_lines(business_id, order_id, line_number, product_id, description, qty_ordered, unit, agreed_unit_price, vat_rate)
