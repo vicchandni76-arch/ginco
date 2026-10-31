@@ -68,8 +68,13 @@ const json = (b: unknown, status = 200) =>
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  const key = Deno.env.get("GEMINI_API_KEY");
-  if (!key) return json({ error: "GEMINI_API_KEY secret is not set" }, 500);
+  const names = ["GEMINI_API_KEY", "GEMINI_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_API_KEY", "GEMINI_API", "AI_API_KEY"];
+  const key = names.map((n) => Deno.env.get(n)?.trim()).find(Boolean);
+  if (!key) {
+    // names only (never values), to help find a mistyped secret
+    const seen = Object.keys(Deno.env.toObject()).filter((n) => !n.startsWith("SUPABASE_") && !/^(DENO|PATH|HOME|HOSTNAME|SB_|EDGE)/.test(n));
+    return json({ error: `Gemini key not found. Add a secret named GEMINI_API_KEY in Supabase → Edge Functions → Secrets. Custom secrets found: ${seen.join(", ") || "none"}` }, 500);
+  }
 
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
