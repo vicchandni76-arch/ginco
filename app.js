@@ -306,8 +306,8 @@ function viewSpeak() {
   <div class="card stack">
     ${live ? `<button class="mic" id="mic" aria-label="Start recording">${I.mic}</button>`
            : `<label class="mic" for="audioFile" role="button" aria-label="Record a voice note">${I.mic}</label>`}
-    <input type="file" id="audioFile" accept="audio/*" capture hidden />
-    <p class="muted small" id="micHint" style="text-align:center">${live ? "Tap to start, tap again to stop" : "Tap to record a voice note with your phone, then tap the tick or Done"}</p>
+    <input type="file" id="audioFile" accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.amr,.3gp,.webm" hidden />
+    <p class="muted small" id="micHint" style="text-align:center">${live ? "Tap to start, tap again to stop" : "Tap, then choose your voice recorder (or a saved voice note)"}</p>
     <p class="xs muted" style="text-align:center">English · हिन्दी · ਪੰਜਾਬੀ — detected automatically</p>
     <div class="field"><label for="transcript">Or type it (any of the three languages)</label>
       <textarea class="input" id="transcript" placeholder="e.g. Ordered 20 kg basmati rice from Ali Foods at £1.20 a kilo · अली फूड्स से 20 किलो चावल मंगवाए"></textarea></div>
