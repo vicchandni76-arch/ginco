@@ -147,10 +147,10 @@ function renderAuth() {
       if (m === "signin") {
         const { error } = await sb.auth.signInWithPassword({ email, password }); if (error) throw error;
       } else if (m === "signup") {
-        const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin } }); if (error) throw error;
+        const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }); if (error) throw error;
         if (!data.session) { msg.innerHTML = `<div class="notice success">Check your email and tap the confirmation link, then sign in.</div>`; state.authMode = "signin"; setTimeout(renderAuth, 4000); return; }
       } else {
-        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin }); if (error) throw error;
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname }); if (error) throw error;
         msg.innerHTML = `<div class="notice success">Reset link sent. Check your email.</div>`;
       }
     } catch (err) { msg.innerHTML = `<div class="notice error">${esc(errMsg(err))}</div>`; }
