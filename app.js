@@ -13,7 +13,7 @@ const state = {
   suppliers: [], products: [],
   route: "home", authMode: "signin",
   review: null,            // extracted data being checked before saving
-  lang: prefGet("ginco_lang", "en-GB"),
+  lang: "en",               // last detected language (en / hi / pa)
   speak: prefGet("ginco_speak", "1") === "1",
   pricesQuery: "", dataTab: "suppliers",
 };
@@ -37,9 +37,14 @@ function toast(msg, kind = "") {
 }
 function errMsg(e) { return e?.message || e?.error_description || e?.error || (typeof e === "string" ? e : "Something went wrong"); }
 
-function speakOut(text) {
+function speakOut(text, lang = state.lang) {
   if (!state.speak || !("speechSynthesis" in window) || !text) return;
-  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = state.lang; speechSynthesis.speak(u); } catch { /* ignore */ }
+  try {
+    speechSynthesis.cancel(); const code = { en: "en-GB", hi: "hi-IN", pa: "pa-IN" }[lang] || "en-GB";
+    const u = new SpeechSynthesisUtterance(text); u.lang = code;
+    const v = speechSynthesis.getVoices().find((x) => x.lang?.replace("_", "-").toLowerCase().startsWith(code.slice(0, 2)));
+    if (v) u.voice = v; speechSynthesis.speak(u);
+  } catch { /* ignore */ }
 }
 
 function sheet(html, onMount) {
@@ -206,8 +211,8 @@ async function mountHome() {
 }
 
 /* ───────────────────────── extraction ───────────────────────── */
-async function extract({ text, image_base64, mime_type }) {
-  const { data, error } = await sb.functions.invoke(EXTRACT_FUNCTION, { body: { text, image_base64, mime_type } });
+async function extract(payload) {
+  const { data, error } = await sb.functions.invoke(EXTRACT_FUNCTION, { body: { reply_language: state.lang, ...payload } });
   if (error) {
     let detail = ""; try { detail = await error.context?.json?.().then((j) => j.error || JSON.stringify(j.detail || j)) || ""; } catch { /* ignore */ }
     throw new Error(detail || errMsg(error));
@@ -259,7 +264,7 @@ function mountScan() {
       stage.innerHTML = `<div class="card stack"><img class="preview" src="${img.dataUrl}" alt="Invoice preview" /><div class="row"><div class="spinner sm"></div><span>Reading with AI… this takes a few seconds</span></div></div>`;
       const data = await extract({ image_base64: img.base64, mime_type: "image/jpeg" });
       state.review = normalise(data, { image: img, via: "scan" });
-      render(); speakOut(summaryLine(state.review));
+      state.review.reply = data.reply; render(); speakOut(data.reply || summaryLine(state.review));
     } catch (err) {
       stage.innerHTML = `<div class="notice error">${esc(errMsg(err))}</div>`;
     }
@@ -267,50 +272,91 @@ function mountScan() {
 }
 
 /* ───────────────────────── speak / type ───────────────────────── */
-const LANGS = [["en-GB", "English"], ["hi-IN", "हिन्दी"], ["pa-IN", "ਪੰਜਾਬੀ"]];
-let recog = null;
+const LANG_LABEL = { en: "English", hi: "हिन्दी", pa: "ਪੰਜਾਬੀ" };
+const TTS_LANG = { en: "en-GB", hi: "hi-IN", pa: "pa-IN" };
+let rec = null; // { mr, stream, chunks, timer, started }
+// Live microphone is only possible where the page is allowed to use it (blocked inside some hosted previews).
+function micAllowed() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return false;
+  const fp = document.permissionsPolicy || document.featurePolicy;
+  try { if (fp?.allowsFeature && !fp.allowsFeature("microphone")) return false; } catch { /* ignore */ }
+  return true;
+}
+const blobToBase64 = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(blob); });
+// Convert any recording to 16 kHz mono WAV so Gemini always accepts it.
+async function toWav(blob) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC(); const buf = await ctx.decodeAudioData(await blob.arrayBuffer()); ctx.close?.();
+    const rate = 16000, len = Math.max(1, Math.ceil(buf.duration * rate));
+    const off = new OfflineAudioContext(1, len, rate); const src = off.createBufferSource(); src.buffer = buf; src.connect(off.destination); src.start();
+    const pcm = (await off.startRendering()).getChannelData(0);
+    const out = new DataView(new ArrayBuffer(44 + pcm.length * 2)); const w = (o, t) => [...t].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)));
+    w(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVE"); w(12, "fmt "); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+    out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, "data"); out.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) { const v = Math.max(-1, Math.min(1, pcm[i])); out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true); }
+    return { blob: new Blob([out], { type: "audio/wav" }), mime: "audio/wav" };
+  } catch { return { blob, mime: blob.type || "audio/mpeg" }; }
+}
 function viewSpeak() {
   if (state.review) return viewReview();
-  const hasSR = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
+  const live = micAllowed();
   return `
-  <div class="page-head"><div><h1>Speak or type</h1><p>Say what you ordered or received. Ginco turns it into a record for you to check.</p></div></div>
+  <div class="page-head"><div><h1>Speak or type</h1><p>Say what you ordered or received in English, Hindi or Punjabi. Ginco works out the language and replies in it.</p></div></div>
   <div class="card stack">
-    <div class="lang" role="group" aria-label="Language">${LANGS.map(([c, l]) => `<button class="btn sm" data-lang="${c}" aria-pressed="${state.lang === c}">${l}</button>`).join("")}</div>
-    ${hasSR ? `<button class="mic" id="mic" aria-label="Start listening">${I.mic}</button><p class="muted small" id="micHint" style="text-align:center">Tap and speak</p>`
-            : `<div class="notice warn">Voice input isn't available in this browser. Type below instead, or use Chrome on Android.</div>`}
-    <div class="field"><label for="transcript">What you said / typed</label>
-      <textarea class="input" id="transcript" placeholder="e.g. Ordered 20 kg basmati rice from Ali Foods at £1.20 a kilo, delivery Friday"></textarea></div>
+    ${live ? `<button class="mic" id="mic" aria-label="Start recording">${I.mic}</button>`
+           : `<label class="mic" for="audioFile" role="button" aria-label="Record a voice note">${I.mic}</label>`}
+    <input type="file" id="audioFile" accept="audio/*" capture hidden />
+    <p class="muted small" id="micHint" style="text-align:center">${live ? "Tap to start, tap again to stop" : "Tap to record a voice note with your phone, then tap the tick or Done"}</p>
+    <p class="xs muted" style="text-align:center">English · हिन्दी · ਪੰਜਾਬੀ — detected automatically</p>
+    <div class="field"><label for="transcript">Or type it (any of the three languages)</label>
+      <textarea class="input" id="transcript" placeholder="e.g. Ordered 20 kg basmati rice from Ali Foods at £1.20 a kilo · अली फूड्स से 20 किलो चावल मंगवाए"></textarea></div>
     <div class="form-actions"><button class="btn" id="clearT">Clear</button><button class="btn primary" id="understand">Understand</button></div>
     <div id="speakMsg"></div>
+    ${live ? `<p class="xs muted" style="text-align:center"><label for="audioFile" style="text-decoration:underline;cursor:pointer">Or use your phone's recorder</label></p>` : ""}
   </div>
-  <p class="muted small" style="margin-top: var(--space-4)">Examples: “Received 5 cases of sunflower oil from Bestway, batch B123, best before March”, “Ordered 10 boxes of mangoes from Fresh Direct at £8.50 a box”.</p>`;
+  <p class="muted small" style="margin-top: var(--space-4)">Examples: “Received 5 cases of sunflower oil from Bestway, batch B123, best before March”, “Bestway se 10 dabbe aam mangvaaye, £8.50 ek dabba”.</p>`;
 }
 function mountSpeak() {
   if (state.review) return mountReview();
-  $$("[data-lang]").forEach((b) => b.addEventListener("click", () => { state.lang = b.dataset.lang; prefSet("ginco_lang", state.lang); render(); }));
-  const ta = $("#transcript"); const mic = $("#mic"); const hint = $("#micHint");
+  const ta = $("#transcript"); const mic = $("#mic"); const hint = $("#micHint"); const msg = $("#speakMsg");
   $("#clearT").addEventListener("click", () => (ta.value = ""));
-  if (mic) {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    mic.addEventListener("click", () => {
-      if (recog) { recog.stop(); return; }
-      recog = new SR(); recog.lang = state.lang; recog.interimResults = true; recog.continuous = false;
-      let finalText = ta.value ? ta.value + " " : "";
-      recog.onstart = () => { mic.classList.add("live"); hint.textContent = "Listening… tap to stop"; };
-      recog.onresult = (e) => { let interim = ""; for (const r of e.results) { if (r.isFinal) finalText += r[0].transcript + " "; else interim += r[0].transcript; } ta.value = (finalText + interim).trim(); };
-      recog.onerror = (e) => { toast(e.error === "not-allowed" ? "Microphone permission was blocked." : `Voice error: ${e.error}`, "error"); };
-      recog.onend = () => { recog = null; mic.classList.remove("live"); hint.textContent = "Tap and speak"; };
-      try { recog.start(); } catch (e) { toast(errMsg(e), "error"); }
-    });
-  }
-  $("#understand").addEventListener("click", async () => {
-    const text = ta.value.trim(); if (!text) { toast("Say or type something first."); return; }
-    const msg = $("#speakMsg"); msg.innerHTML = `<div class="row"><div class="spinner sm"></div><span>Understanding…</span></div>`;
+  const busy = (t) => (msg.innerHTML = `<div class="row"><div class="spinner sm"></div><span>${esc(t)}</span></div>`);
+  async function understand(payload, typed) {
+    busy(payload.audio_base64 ? "Listening to your recording…" : "Understanding…");
     try {
-      const data = await extract({ text });
-      state.review = normalise(data, { transcript: text, via: "voice" });
-      render(); speakOut(summaryLine(state.review));
+      const data = await extract(payload);
+      if (data.language && TTS_LANG[data.language]) state.lang = data.language;
+      const transcript = typed || data.transcript || "";
+      state.review = normalise(data, { transcript, via: "voice", language: data.language, reply: data.reply });
+      render(); speakOut(data.reply || summaryLine(state.review), data.language);
     } catch (err) { msg.innerHTML = `<div class="notice error">${esc(errMsg(err))}</div>`; }
+  }
+  async function sendAudio(blob) {
+    if (!blob || blob.size < 1000) { toast("That recording was empty. Try again."); return; }
+    if (blob.size > 9_000_000) { toast("Recording is too long. Keep it under 2 minutes.", "error"); return; }
+    busy("Preparing recording…");
+    const { blob: wav, mime } = await toWav(blob);
+    await understand({ audio_base64: await blobToBase64(wav), audio_mime: mime });
+  }
+  $("#audioFile").addEventListener("change", (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) sendAudio(f); });
+  if (mic) mic.addEventListener("click", async () => {
+    if (rec) { rec.mr.stop(); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { toast("Microphone is blocked here, so Ginco will use your phone's recorder instead.", "error"); $("#audioFile").click(); return; }
+    const chunks = []; const mr = new MediaRecorder(stream);
+    rec = { mr, stream, chunks, started: Date.now() };
+    mr.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
+    mr.onstop = () => { clearInterval(rec.timer); stream.getTracks().forEach((t) => t.stop()); mic.classList.remove("live"); hint.textContent = "Tap to start, tap again to stop";
+      const b = new Blob(chunks, { type: mr.mimeType || "audio/webm" }); rec = null; sendAudio(b); };
+    mr.start(); mic.classList.add("live");
+    rec.timer = setInterval(() => { const s = Math.round((Date.now() - rec.started) / 1000); hint.textContent = `Recording ${s}s… tap to stop`; if (s >= 120) mr.stop(); }, 500);
+    hint.textContent = "Recording… tap to stop";
+  });
+  $("#understand").addEventListener("click", () => {
+    const text = ta.value.trim(); if (!text) { toast("Say or type something first."); return; }
+    understand({ text }, text);
   });
 }
 
@@ -344,7 +390,8 @@ function viewReview() {
     <button class="btn ghost sm" id="discard">${I.x} Discard</button></div>
   ${r.notes ? `<div class="notice warn" style="margin-bottom: var(--space-3)">Reader note: ${esc(r.notes)}</div>` : ""}
   ${r.image ? `<img class="preview" src="${r.image.dataUrl}" alt="Scanned document" style="margin-bottom: var(--space-3); max-height: 10rem" />` : ""}
-  ${r.transcript ? `<div class="card small" style="margin-bottom: var(--space-3)"><span class="muted">You said:</span> “${esc(r.transcript)}”</div>` : ""}
+  ${r.reply ? `<div class="notice info" style="margin-bottom: var(--space-3)"><b>Ginco:</b> ${esc(r.reply)}</div>` : ""}
+  ${r.transcript ? `<div class="card small" style="margin-bottom: var(--space-3)"><span class="muted">You said${r.language ? ` (${esc(LANG_LABEL[r.language] || r.language)})` : ""}:</span> “${esc(r.transcript)}”</div>` : ""}
   <form id="reviewForm" class="stack">
     <div class="subtabs" role="tablist">${kinds.map(([k, l]) => `<button type="button" role="tab" data-kind="${k}" aria-selected="${r.kind === k}">${l}</button>`).join("")}</div>
     <div class="card stack">
@@ -408,7 +455,7 @@ function mountReview() {
     const btn = $("#saveBtn"); btn.disabled = true; btn.innerHTML = `<div class="spinner sm"></div> Saving…`; const msg = $("#saveMsg"); msg.innerHTML = "";
     try {
       const res = await saveReview(r);
-      toast("Saved", "success"); speakOut(r.kind === "order" ? "Order saved." : "Invoice saved.");
+      toast("Saved", "success"); speakOut(({ hi: "सेव हो गया।", pa: "ਸੇਵ ਹੋ ਗਿਆ।" })[r.language] || (r.kind === "order" ? "Order saved." : "Invoice saved."), r.language);
       await loadLists(); state.review = null;
       app.querySelector("main").innerHTML = `<div class="card empty" style="margin-top: var(--space-8)">
         <span style="color: var(--color-success)">${I.box}</span><h2>Saved</h2>
@@ -622,7 +669,7 @@ function viewAccount() {
   <div class="card stack">
     <div class="row between"><div><div class="xs muted">Business</div><div><b>${esc(state.business.name)}</b> · ${esc(state.business.currency)}</div></div><span class="pill primary">${esc(state.business.role)}</span></div>
     <div class="row between"><div><div class="xs muted">Spoken replies</div><div class="small muted">Ginco reads results aloud after scanning or listening</div></div><input type="checkbox" id="speakToggle" ${state.speak ? "checked" : ""} style="width:1.4rem;height:1.4rem"/></div>
-    <div class="row between"><div><div class="xs muted">Voice language</div></div><select class="input" id="langSel" style="width:auto">${LANGS.map(([c, l]) => `<option value="${c}" ${state.lang === c ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+    <div class="row between"><div><div class="xs muted">Voice language</div><div class="small muted">Detected automatically: English, हिन्दी or ਪੰਜਾਬੀ. Ginco replies in the language you used.</div></div></div>
   </div>
   <div class="card stack" style="margin-top: var(--space-3)">
     <h3>Tip: add Ginco to your home screen</h3>
@@ -632,7 +679,6 @@ function viewAccount() {
 }
 function mountAccount() {
   $("#speakToggle").addEventListener("change", (e) => { state.speak = e.target.checked; prefSet("ginco_speak", state.speak ? "1" : "0"); });
-  $("#langSel").addEventListener("change", (e) => { state.lang = e.target.value; prefSet("ginco_lang", state.lang); });
   $("#signOut").addEventListener("click", () => sb.auth.signOut());
 }
 

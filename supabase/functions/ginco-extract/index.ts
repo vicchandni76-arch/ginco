@@ -39,6 +39,9 @@ const schema = {
       },
     },
     notes: { type: "string", description: "anything unclear or unreadable" },
+    language: { type: "string", enum: ["en", "hi", "pa"], description: "main language the user spoke or typed: en English, hi Hindi, pa Punjabi" },
+    transcript: { type: "string", description: "for audio: exactly what was said, in the original language and script" },
+    reply: { type: "string", description: "one or two short friendly sentences, in the reply language, summarising what was understood and asking the user to check and save" },
   },
   required: ["lines"],
 };
@@ -70,19 +73,28 @@ Deno.serve(async (req: Request) => {
 
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
-  const { text, image_base64, mime_type } = body ?? {};
-  if (!text && !image_base64) return json({ error: "Send text and/or image_base64" }, 400);
+  const { text, image_base64, mime_type, audio_base64, audio_mime, reply_language } = body ?? {};
+  if (!text && !image_base64 && !audio_base64) return json({ error: "Send text, image_base64 or audio_base64" }, 400);
   if (image_base64 && image_base64.length > 14_000_000) return json({ error: "Image too large; resize and retry" }, 413);
+  if (audio_base64 && audio_base64.length > 14_000_000) return json({ error: "Recording too long; keep it under a few minutes" }, 413);
+  const aMime = String(audio_mime || "audio/webm").split(";")[0];
+  const langName: Record<string, string> = { en: "English", hi: "Hindi (Devanagari script)", pa: "Punjabi (Gurmukhi script)" };
 
   const today = new Date().toISOString().slice(0, 10);
   const prompt =
     `Today is ${today}. Extract purchasing data for a UK food retail/wholesale business into the JSON schema. ` +
     `Rules: copy numbers exactly as printed; never invent values, leave a field out if unknown; dates as YYYY-MM-DD; currency GBP unless shown otherwise; ` +
     `put anything unclear in notes. If the input is a spoken or typed note (e.g. 'ordered 20kg basmati from Ali Foods at 1.20 a kilo today'), ` +
-    `set document_type to order and fill supplier_name and lines. ` + (text ? `\n\nInput text:\n${text}` : "");
+    `set document_type to order and fill supplier_name and lines. ` +
+    `The user may speak or type in English, Hindi or Punjabi, including romanised Hindi/Punjabi or a mix with English words; detect it yourself and set language. ` +
+    `Always write supplier_name and line descriptions in English (translate or transliterate product names, e.g. 'chawal' -> 'rice'). ` +
+    (audio_base64 ? `An audio recording is attached: transcribe it into transcript, then extract from it. ` : "") +
+    `Write reply in ${audio_base64 || text ? "the same language the user used (Hindi in Devanagari, Punjabi in Gurmukhi)" : (langName[reply_language] ?? "English")}. ` +
+    (text ? `\n\nInput text:\n${text}` : "");
 
   const input: unknown[] = [{ type: "text", text: prompt }];
   if (image_base64) input.push({ type: "image", data: image_base64, mime_type: mime_type || "image/jpeg" });
+  if (audio_base64) input.push({ type: "audio", data: audio_base64, mime_type: aMime });
 
   // 1st try: Interactions API (Google's default since June 2026)
   let res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
@@ -97,6 +109,7 @@ Deno.serve(async (req: Request) => {
   if (!res.ok || !pickText(raw)) {
     const parts: unknown[] = [{ text: prompt }];
     if (image_base64) parts.push({ inline_data: { mime_type: mime_type || "image/jpeg", data: image_base64 } });
+    if (audio_base64) parts.push({ inline_data: { mime_type: aMime, data: audio_base64 } });
     const res2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
       method: "POST",
       headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
