@@ -7,6 +7,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $("#app");
 
+const prefs = {};
 const state = {
   session: null, user: null, business: null, memberships: [],
   suppliers: [], products: [],
@@ -18,7 +19,6 @@ const state = {
 };
 
 // Preferences are kept in memory for this visit (works in any hosting environment).
-const prefs = {};
 function prefGet(k, d) { return prefs[k] ?? d; }
 function prefSet(k, v) { prefs[k] = v; }
 
